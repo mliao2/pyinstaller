@@ -131,6 +131,10 @@ class FrozenImporter(object):
         # It was needed only for FrozenImporter class. Wrong path from sys.path
         # Raises ArchiveReadError exception.
         for pyz_filepath in sys.path:
+            # We need to acquire the interpreter's import lock here
+            # because ZlibArchive() seeks through and reads from the
+            # zip archive.
+            imp.acquire_lock()
             try:
                 # Unzip zip archive bundled with the executable.
                 self._pyz_archive = ZlibArchive(pyz_filepath)
@@ -151,6 +155,8 @@ class FrozenImporter(object):
             except ArchiveReadError:
                 # Item from sys.path is not ZlibArchive let's try next.
                 continue
+            finally:
+                imp.release_lock()
         # sys.path does not contain filename of executable with bundled zip archive.
         # Raise import error.
         raise ImportError("Can't load frozen modules.")
@@ -165,7 +171,7 @@ class FrozenImporter(object):
         Return a loader object if the module was found, or None if it wasn't. If find_module() raises
         an exception, it will be propagated to the caller, aborting the import.
         """
-        # Acquire the interpreter's import lock for the current thread. Tis
+        # Acquire the interpreter's import lock for the current thread. This
         # lock should be used by import hooks to ensure thread-safety when
         # importing modules.
         imp.acquire_lock()
@@ -374,23 +380,28 @@ class CExtensionImporter(object):
     """
     def __init__(self):
         # TODO cache directory content for faster module lookup without file system access.
-        # Find the platform specific suffix. On Windows it is .pyd, on Linux/Unix .so.
-        for ext, mode, typ in imp.get_suffixes():
-            if typ == imp.C_EXTENSION:
-                self._c_ext_tuple = (ext, mode, typ)
-                self._suffix = ext  # Just string like .pyd  or  .so
-                break
         # Create hashmap of directory content for better performance.
         files = pyi_os_path.os_listdir(sys.prefix)
         self._file_cache = set(files)
+
+        self._suffixes = dict()
+
+        # Find the platform specific suffixes. On Windows it is .pyd, on Linux/Unix .so.
+        for ext, mode, typ in imp.get_suffixes():
+            if typ == imp.C_EXTENSION:
+                self._suffixes[ext] = (ext, mode, typ)
 
     def find_module(self, fullname, path=None):
         imp.acquire_lock()
         module_loader = None  # None means - no module found by this importer.
 
         # Look in the file list of sys.prefix path (alias PYTHONHOME).
-        if fullname + self._suffix in self._file_cache:
-            module_loader = self
+        for ext, c_ext_tuple in self._suffixes.items():
+            if fullname + ext in self._file_cache:
+                self._c_ext_tuple = c_ext_tuple
+                self._suffix = ext
+                module_loader = self
+                break
 
         imp.release_lock()
         return module_loader

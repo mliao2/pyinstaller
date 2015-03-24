@@ -45,6 +45,58 @@ def _handle_broken_tk():
                 v['TIX_LIBRARY'] = abs_path
 
 
+def _warn_if_actvivetcl_or_teapot_install(tcl_root, tcltree):
+    """
+    Workaround ActiveTcl on OS X
+
+    PyInstaller does not package all requirements of ActiveTcl
+    (most notably teapot, which is not typically required). This
+    means packages built against ActiveTcl usually won't run on
+    non-host systems.
+
+    This method checks if ActiveTcl is being used, and if so logs
+    a warning if the problematic code is not commented out.
+
+    https://github.com/pyinstaller/pyinstaller/issues/621
+    """
+
+    from PyInstaller.lib.macholib import util
+    if util.in_system_path(tcl_root):
+        # system libraries do not experience this problem
+        return
+
+    # get the path to the 'init.tcl' script
+    try:
+        init_resource = [r[1] for r in tcltree if r[1].endswith('init.tcl')][0]
+    except IndexError:
+        # couldn't find the init script, return
+        return
+
+    mentions_activetcl = False
+    mentions_teapot = False
+    with open(init_resource, 'r') as init_file:
+        for line in init_file.readlines():
+            line = line.strip().lower()
+            if line.startswith('#'):
+                continue
+            if 'activetcl' in line:
+                mentions_activetcl = True
+            if 'teapot' in line:
+                mentions_teapot = True
+            if mentions_activetcl and mentions_teapot:
+                break
+
+    if mentions_activetcl and mentions_teapot:
+        logger.warning("""It seems you are using an ActiveTcl build of Tcl/Tk.\
+ This may not package correctly with PyInstaller.
+To fix the problem, please try commenting out all mentions of 'teapot' in:
+
+     %s
+
+See https://github.com/pyinstaller/pyinstaller/issues/621 for more information"""
+                       % init_resource)
+
+
 def _find_tk_darwin_frameworks(binaries):
     """
     Tcl and Tk are installed as Mac OS X Frameworks.
@@ -69,10 +121,10 @@ def _find_tk_tclshell():
     tcl_root = tk_root = None
 
     # Python code to get path to TCL_LIBRARY.
-    code = 'from Tkinter import Tcl; t = Tcl(); print t.eval("info library")'
+    code = 'from Tkinter import Tcl; t = Tcl(); print(t.eval("info library"))'
 
     tcl_root = exec_statement(code)
-    tk_version = exec_statement('from _tkinter import TK_VERSION as v; print v')
+    tk_version = exec_statement('from _tkinter import TK_VERSION as v; print(v)')
     # TK_LIBRARY is in the same prefix as Tcl.
     tk_root = os.path.join(os.path.dirname(tcl_root), 'tk%s' % tk_version)
     return tcl_root, tk_root
@@ -91,9 +143,9 @@ def _find_tk(mod):
     if is_darwin:
         # _tkinter depends on system Tcl/Tk frameworks.
         if not bins:
-            # 'mod.binaries' can't be used because on Mac OS X _tkinter.so
+            # 'mod.pyinstaller_binaries' can't be used because on Mac OS X _tkinter.so
             # might depend on system Tcl/Tk frameworks and these are not
-            # included in 'mod.binaries'.
+            # included in 'mod.pyinstaller_binaries'.
             bins = PyInstaller.bindepend.getImports(mod.__file__)
             # Reformat data structure from
             #     set(['lib1', 'lib2', 'lib3'])
@@ -137,6 +189,11 @@ def _collect_tkfiles(mod):
 
     tcltree = Tree(tcl_root, os.path.join('_MEI', tcldir),
                    excludes=['demos', '*.lib', 'tclConfig.sh'])
+
+    if is_darwin:
+        # handle workaround for ActiveTcl on OS X
+        _warn_if_actvivetcl_or_teapot_install(tcl_root, tcltree)
+
     tktree = Tree(tk_root, os.path.join('_MEI', tkdir),
                   excludes=['demos', '*.lib', 'tkConfig.sh'])
     return (tcltree + tktree)
@@ -146,13 +203,13 @@ def hook(mod):
     # If not supported platform, skip TCL/TK detection.
     if not (is_win or is_darwin or is_unix):
         logger.info("... skipping TCL/TK detection on this platform (%s)",
-                sys.platform)
+                    sys.platform)
         return mod
 
     # Get the Tcl/Tk data files for bundling with executable.
     #try:
     tk_files = _collect_tkfiles(mod)
-    mod.datas.extend(tk_files)
+    mod.pyinstaller_datas.extend(tk_files)
     #except:
     #logger.error("could not find TCL/TK")
 
